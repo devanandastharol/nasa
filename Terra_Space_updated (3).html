@@ -1,6 +1,12 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style><script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 /* Field monitor section: uses the same tokens as the rest of Terra Space */
+#fm-map { height: 260px; margin-top: 4px; border-radius: 16px; border: 1px solid rgba(255,255,255,.2); overflow: hidden; z-index: 0; }
+.fm-mapcap { margin: 8px 4px 0; font-size: 14px; color: var(--mint); }
+.leaflet-container { font-family: var(--body); background: #17391F; }
+.leaflet-popup-content-wrapper { border-radius: 12px; }
 .fm-sel { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 26px 0 0; }
 .fm-lab { font-size: 13px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #B5DB8F; }
 .fm-dd { position: relative; min-width: min(100%, 340px); }
@@ -366,6 +372,8 @@ dl.kv dd { margin: 0; color: var(--mint); min-width: 0; }
     <div class="wx-alts" id="fm-alts"></div>
 
     <div id="fm-out" hidden>
+      <div id="fm-map" role="img" aria-label="Map of the chosen place"></div>
+      <p class="fm-mapcap" id="fm-mapcap"></p>
       <div class="fm-sel">
         <span class="fm-lab" id="fm-dd-l">Crop</span>
         <div class="fm-dd" id="fm-dd">
@@ -384,8 +392,8 @@ dl.kv dd { margin: 0; color: var(--mint); min-width: 0; }
       <div id="fm-single" hidden>
         <div class="fm-verdict" id="fm-verdict"></div>
         <div class="fm-grid">
-          <div class="wx-card fm-card"><h3>Does the climate match?</h3><p class="fm-sub">The green zone is what the crop needs. The yellow dot is your place.</p><div id="fm-rows"></div></div>
-          <div class="wx-card fm-card"><h3 id="fm-match-t">Match score</h3><p class="fm-sub">How well each condition fits this crop (%).</p><div class="fm-ch"><canvas id="c-match"></canvas></div></div>
+          <div class="wx-card fm-card"><h3>Soil compatibility</h3><p class="fm-sub" id="fm-st-sub"></p><div class="chips" id="fm-st-chips" style="margin-bottom:12px" role="group" aria-label="Soil texture"></div><div class="fm-ch" id="fm-st-ch"><canvas id="c-st"></canvas></div></div>
+          <div class="wx-card fm-card"><h3 id="fm-match-t">Match score</h3><p class="fm-sub" id="fm-match-s">How well each condition fits this crop (%).</p><div class="fm-ch"><canvas id="c-match"></canvas></div></div>
           <div class="wx-card fm-card"><h3>Temperature</h3><p class="fm-sub">Daily average, last 7 and next 7 days. Dashed lines show the crop's comfortable range.</p><div class="fm-ch"><canvas id="c-temp"></canvas></div></div>
           <div class="wx-card fm-card"><h3>Rainfall</h3><p class="fm-sub">Rain in mm.</p>
             <div class="chips" id="fm-rainmode" style="margin-bottom:12px"></div>
@@ -806,7 +814,7 @@ dl.kv dd { margin: 0; color: var(--mint); min-width: 0; }
   var SOIL = [[0.12, 'critical, drought risk'], [0.20, 'dry'], [0.40, 'optimal'], [0.50, 'wet'], [9, 'saturated, flood risk']];
   function soilBand(v) { for (var i = 0; i < SOIL.length; i++) if (v <= SOIL[i][0]) return SOIL[i]; return SOIL[SOIL.length - 1]; }
 
-  var S = null, charts = {}, rainMode = 'daily', token = 0, sel = -1, picked = false;
+  var map = null, pin = null, S = null, charts = {}, rainMode = 'daily', token = 0, sel = -1, picked = false;
   var status = $('fm-status'), alts = $('fm-alts');
   function busy(on) { $('fm-go').disabled = on; $('fm-gps').disabled = on; }
 
@@ -871,13 +879,23 @@ dl.kv dd { margin: 0; color: var(--mint); min-width: 0; }
 
   // ---------- place search (no GPS needed) ----------
   function label(p) { return [p.name, p.admin1, p.country].filter(Boolean).join(', '); }
+  // Some places are not in the geocoder under their common name; try nearby towns
+  var ALIAS = { wayanad: ['Kalpetta', 'Mananthavady', 'Sultan Bathery'], wynad: ['Kalpetta'], waynad: ['Kalpetta'], vayanad: ['Kalpetta'], 'wayanad district': ['Kalpetta'] };
+  function geoURL(n) { return 'https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name=' + encodeURIComponent(n); }
+  function geocode(q) {
+    var tries = [q].concat(ALIAS[q.toLowerCase()] || []);
+    function next(i) {
+      if (i >= tries.length) return Promise.resolve([]);
+      return getJSON(geoURL(tries[i])).then(function (g) { return g.results && g.results.length ? g.results : next(i + 1); });
+    }
+    return next(0);
+  }
   function search(q) {
     q = (q || '').trim();
     if (!q) { status.textContent = 'Type a place name first.'; return; }
     busy(true); alts.innerHTML = ''; status.textContent = 'Searching for ' + q + '\u2026';
-    getJSON('https://geocoding-api.open-meteo.com/v1/search?count=5&name=' + encodeURIComponent(q)).then(function (g) {
-      if (!g.results || !g.results.length) { busy(false); status.textContent = 'No place found for \u201c' + q + '\u201d. Check the spelling or try a nearby town.'; return; }
-      var r = g.results;
+    geocode(q).then(function (r) {
+      if (!r.length) { busy(false); status.textContent = 'No place found for \u201c' + q + '\u201d. Check the spelling or try a nearby town.'; return; }
       if (r.length > 1) {
         var lead = document.createElement('span'); lead.textContent = 'Not the right place?'; alts.appendChild(lead);
         r.slice(1).forEach(function (p) {
@@ -933,8 +951,11 @@ dl.kv dd { margin: 0; color: var(--mint); min-width: 0; }
         D.time.forEach(function (t, i) { var k = t.slice(0, 7); if (!(k in mm)) { mm[k] = 0; keys.push(k); } mm[k] += D.precipitation_sum[i] || 0; });
         S.months = { labels: keys, values: keys.map(function (k) { return Math.round(mm[k]); }) };
       }
+      S.st = null; S.stState = 'loading'; S.manual = null;
       status.textContent = name + ' (' + S.lat.toFixed(2) + ', ' + S.lon.toFixed(2) + ').';
       $('fm-out').hidden = false;
+      drawMap();
+      loadSoilType(lat, lon, my);
       // Until the person picks a crop, show the best match for this place
       if (!picked && S.yearTemp != null) {
         var best = 0, bs = -1;
@@ -959,26 +980,88 @@ dl.kv dd { margin: 0; color: var(--mint); min-width: 0; }
     var v = [score(S.yearTemp, c[1], c[2], 0), score(S.yearRain, c[3], c[4], c[5])].filter(function (x) { return x != null; });
     return v.length ? mean(v) : 0;
   }
-  function rowHTML(title, unit, v, lo, hi, max, irr) {
-    var s = score(v, lo, hi, irr), c = cls(s), pct = function (x) { return Math.min(100, Math.max(0, x / max * 100)); };
-    var msg = c === 'ok' ? 'Suitable' : (v < lo ? (irr ? 'Low, irrigation needed' : (c === 'near' ? 'Slightly low' : 'Too low')) : (c === 'near' ? 'Slightly high' : 'Too high'));
-    return '<div class="fm-row"><div class="top"><strong>' + title + '</strong><span>' + (Math.round(v * 10) / 10) + ' ' + unit + ' \u00b7 needs ' + lo + '\u2013' + hi + ' \u00b7 <span class="fm-' + c + '">' + msg + '</span></span></div>' +
-      '<div class="fm-track"><div class="fm-zone" style="left:' + pct(lo) + '%;width:' + (pct(hi) - pct(lo)) + '%"></div><div class="fm-mark" style="left:' + pct(v) + '%"></div></div>' +
-      '<div class="fm-scale"><span>0</span><span>' + max + ' ' + unit + '</span></div></div>';
-  }
   function drawCrop() {
-    var c = CROPS[sel], box = $('fm-rows'), vd = $('fm-verdict');
+    var c = CROPS[sel], vd = $('fm-verdict');
     $('fm-match-t').textContent = 'Match score for ' + c[0];
     if (S.yearTemp == null) {
-      box.innerHTML = '<p class="fm-sub">Yearly climate data could not be loaded, so the crop match is not available.</p>';
+      $('fm-match-s').textContent = 'Yearly climate data could not be loaded, so the crop match is not available.';
       vd.className = 'fm-verdict near'; vd.innerHTML = '<span>Crop match is not available right now.</span>'; return;
     }
-    box.innerHTML = rowHTML('Average temperature', '\u00b0C', S.yearTemp, c[1], c[2], 45, 0) +
-      rowHTML('Rainfall, last 12 months', 'mm', S.yearRain, c[3], c[4], 4500, c[5]);
+    $('fm-match-s').textContent = c[0] + ' needs ' + c[1] + '\u2013' + c[2] + ' \u00b0C and ' + c[3] + '\u2013' + c[4] + ' mm of rain a year' + (c[5] ? ' (plus irrigation)' : '') +
+      '. Here: ' + (Math.round(S.yearTemp * 10) / 10) + ' \u00b0C and ' + Math.round(S.yearRain) + ' mm.';
     var t = total(c), pct = Math.round(t * 100);
     vd.className = 'fm-verdict ' + (t >= 0.9 ? '' : t >= 0.6 ? 'near' : 'bad');
     vd.innerHTML = '<strong>' + pct + '%</strong><span></span>';
     vd.querySelector('span').textContent = c[0] + ' is ' + (t >= 0.9 ? 'well suited' : t >= 0.6 ? 'moderately suited' : 'poorly suited') + ' at ' + S.name + '.';
+  }
+
+  // ---------- soil type compatibility ----------
+  // per crop (same order as CROPS): texture low, texture high (0 sandy ... 4 clay), pH low, pH high, what the crop guide says
+  var SOILREQ = [
+    [3, 4, 5.5, 7.0, 'clay or clay loam that holds water'], [2, 3, 6.0, 7.5, 'well-drained loam or clay loam'], [1, 2, 5.8, 7.0, 'sandy loam to loam'],
+    [0, 2, 6.5, 8.0, 'sandy or light loam'], [2, 3, 6.0, 8.5, 'medium to deep loam'], [1, 3, 6.0, 8.0, 'sandy loam to clay loam'],
+    [2, 3, 6.5, 7.5, 'well-drained loam'], [2, 3, 6.0, 8.0, 'loam to clay loam'], [1, 2, 6.0, 7.5, 'sandy loam to loam'],
+    [0.5, 1.5, 6.0, 7.0, 'loose, well-drained sandy loam'], [2, 3, 6.0, 7.5, 'well-drained loam'], [3, 4, 6.0, 8.0, 'deep clayey (black) soil'],
+    [2, 3, 6.5, 7.5, 'deep, well-drained loam'], [2, 3, 4.5, 5.5, 'deep, acidic, well-drained soil'], [2, 3, 6.0, 6.5, 'deep, humus-rich loam'],
+    [1, 3, 4.5, 6.0, 'deep, well-drained lateritic loam'], [1, 3, 5.2, 8.0, 'sandy loam or lateritic soil'], [2, 3, 5.0, 6.5, 'well-drained loamy soil rich in humus'],
+    [1, 2, 5.5, 7.5, 'well-drained loam or sandy loam'], [2, 4, 6.0, 7.5, 'well-drained loam or clay-rich soil'], [1, 3, 6.0, 7.0, 'sandy loam to clay loam'],
+    [1, 2, 6.0, 7.5, 'well-drained loam or sandy loam'], [1, 2, 5.2, 6.5, 'loose, well-drained sandy loam or loam'], [2, 3, 6.0, 7.5, 'deep, well-drained loam']
+  ];
+  var TEX = [['Sandy', 0], ['Sandy loam', 1], ['Loam', 2], ['Clay loam', 3], ['Clay', 4]];
+  function texClass(sa, si, cl) {
+    if (cl >= 40) return si >= 40 ? ['silty clay', 3.5] : sa >= 45 ? ['sandy clay', 3.5] : ['clay', 4];
+    if (cl >= 27) return sa > 45 ? ['sandy clay loam', 2.5] : sa <= 20 ? ['silty clay loam', 3] : ['clay loam', 3];
+    if (cl >= 20 && si < 28 && sa > 45) return ['sandy clay loam', 2.5];
+    if (si >= 50) return (si >= 80 && cl < 12) ? ['silt', 2] : ['silt loam', 2];
+    if (sa >= 85 && si + 1.5 * cl < 15) return ['sand', 0];
+    if (sa >= 70 && si + 1.5 * cl < 30) return ['loamy sand', 0.5];
+    if ((cl < 7 && si < 50 && sa > 43) || (cl < 20 && sa > 52)) return ['sandy loam', 1];
+    return ['loam', 2];
+  }
+  function texFit(f, lo, hi) { var d = f < lo ? lo - f : f > hi ? f - hi : 0; return Math.max(0.1, 1 - d * 0.4); }
+  function phFit(v, lo, hi) { var d = v < lo ? lo - v : v > hi ? v - hi : 0; return Math.max(0, 1 - d / 1.5); }
+  function loadSoilType(lat, lon, my) {
+    var u = 'https://rest.isric.org/soilgrids/v2.0/properties/query?lon=' + lon + '&lat=' + lat + '&property=clay&property=sand&property=silt&property=phh2o&depth=0-5cm&value=mean';
+    getJSON(u).then(function (j) {
+      if (my !== token) return;
+      var o = {};
+      j.properties.layers.forEach(function (l) {
+        var m = l.depths[0].values.mean, df = (l.unit_measure && l.unit_measure.d_factor) || 1;
+        if (m != null) o[l.name] = m / df;
+      });
+      if (o.clay == null || o.sand == null || o.silt == null) throw new Error('no soil data');
+      var tc = texClass(o.sand, o.silt, o.clay);
+      S.st = { tex: tc[0], f: tc[1], sa: o.sand, si: o.silt, cl: o.clay, ph: o.phh2o == null ? null : o.phh2o };
+      S.stState = 'ok';
+    }).catch(function () { if (my === token) S.stState = 'fail'; })
+      .then(function () { if (my === token && S && sel >= 0) drawSoilType(); });
+  }
+  function drawSoilType() {
+    var c = CROPS[sel], req = SOILREQ[sel], det = S.st, sub = $('fm-st-sub'), ch = $('fm-st-ch'), box = $('fm-st-chips');
+    var f = S.manual != null ? S.manual : (det ? det.f : null);
+    var near = f == null ? null : TEX.reduce(function (a, t) { return Math.abs(t[1] - f) < Math.abs(a[1] - f) ? t : a; }, TEX[0])[1];
+    box.innerHTML = '';
+    TEX.forEach(function (t) {
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.textContent = t[0];
+      b.setAttribute('aria-pressed', t[1] === near ? 'true' : 'false');
+      b.addEventListener('click', function () { S.manual = t[1]; drawSoilType(); });
+      box.appendChild(b);
+    });
+    var head;
+    if (S.manual != null) head = 'Using the soil texture you chose.';
+    else if (det) head = 'Detected soil here: ' + det.tex + ' (sand ' + Math.round(det.sa) + '%, silt ' + Math.round(det.si) + '%, clay ' + Math.round(det.cl) + '%)' + (det.ph != null ? ', pH ' + det.ph.toFixed(1) : '') + '.';
+    else if (S.stState === 'loading') head = 'Detecting the soil here\u2026 You can also choose your soil below.';
+    else head = 'Could not detect the soil automatically. Choose your soil below.';
+    sub.textContent = head + ' ' + c[0] + ' prefers ' + req[4] + ', soil pH ' + req[2] + '\u2013' + req[3] + '.';
+    if (f == null) { ch.hidden = true; if (charts['c-st']) { charts['c-st'].destroy(); delete charts['c-st']; } return; }
+    ch.hidden = false;
+    var labels = ['Soil texture'], vals = [texFit(f, req[0], req[1])];
+    if (det && det.ph != null) { labels.push('Soil pH'); vals.push(phFit(det.ph, req[2], req[3])); }
+    labels.push('Overall soil fit'); vals.push(mean(vals));
+    mk('c-st', { type: 'bar', data: { labels: labels, datasets: [{
+      data: vals.map(function (x) { return Math.round(x * 100); }), backgroundColor: vals.map(col), borderRadius: 8, maxBarThickness: 64
+    }] }, options: { plugins: { legend: { display: false }, tooltip: { callbacks: { label: function (x) { return x.parsed.y + '% fit'; } } } },
+      scales: { y: { min: 0, max: 100, title: { display: true, text: '% fit' } }, x: { grid: { display: false } } } } });
   }
 
   // ---------- charts ----------
@@ -1059,12 +1142,32 @@ dl.kv dd { margin: 0; color: var(--mint); min-width: 0; }
       onClick: function (e, els) { if (els.length) choose(list[els[0].index].i, true); } } });
   }
 
+  // ---------- small map ----------
+  function drawMap() {
+    if (typeof L === 'undefined') { $('fm-map').hidden = true; $('fm-mapcap').textContent = 'The map could not load. Check your internet connection.'; return; }
+    $('fm-map').hidden = false;
+    if (!map) {
+      map = L.map('fm-map', { scrollWheelZoom: false, zoomControl: true });
+      var esri = function (n) { return L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/' + n + '/MapServer/tile/{z}/{y}/{x}', { maxZoom: 18, attribution: 'Tiles &copy; Esri' }); };
+      var sat = esri('World_Imagery'), street = esri('World_Street_Map');
+      sat.addTo(map);
+      L.control.layers({ 'Satellite': sat, 'Street map': street }, null, { collapsed: true }).addTo(map);
+    }
+    if (pin) map.removeLayer(pin);
+    pin = L.circleMarker([S.lat, S.lon], { radius: 9, color: '#14301C', weight: 3, fillColor: SUN, fillOpacity: 1 }).addTo(map);
+    var tip = document.createElement('strong'); tip.textContent = S.name;
+    pin.bindPopup(tip);
+    map.setView([S.lat, S.lon], 11);
+    $('fm-mapcap').textContent = S.name + ' \u00b7 ' + S.lat.toFixed(3) + ', ' + S.lon.toFixed(3);
+    setTimeout(function () { map.invalidateSize(); map.setView([S.lat, S.lon], 11); }, 150);
+  }
+
   function render() {
     var all = sel < 0;
     $('fm-all').hidden = !all; $('fm-single').hidden = all;
     if (all) { drawRank(); }
-    else { drawCrop(); drawMatch(); drawTemp(); drawRain(); drawHum(); drawSoil(); }
-    $('fm-src').textContent = 'Sources: Open-Meteo (temperature, rain, humidity, soil moisture; yearly climate from its archive). Soil moisture is the topsoil value for the whole area (about a 10 km grid), not a single field. Crop ranges are the typical values from the crop guide above; check with your local Krishi Vigyan Kendra before sowing.';
+    else { drawCrop(); drawSoilType(); drawMatch(); drawTemp(); drawRain(); drawHum(); drawSoil(); }
+    $('fm-src').textContent = 'Sources: Open-Meteo (temperature, rain, humidity, soil moisture; yearly climate from its archive) and ISRIC SoilGrids (soil texture and pH). Named soils such as black soil or laterite cannot be detected, only texture and pH. Soil moisture is the topsoil value for the whole area (about a 10 km grid), not a single field. Crop ranges are the typical values from the crop guide above; check with your local Krishi Vigyan Kendra before sowing.';
   }
 })();
 </script>
