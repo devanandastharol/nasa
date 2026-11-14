@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FarmCare – Crop suitability</title>
+<style>
+:root{--bg:#f3f6ee;--ink:#1c2a1f;--mute:#5b6b5e;--card:#fff;--line:#d5dfd0;--green:#2f6b3a;--zone:#bfe0c4;--ok:#2f6b3a;--near:#c58a12;--bad:#b3441f;--sky:#2b6f9e}
+@media(prefers-color-scheme:dark){:root{--bg:#121a14;--ink:#e8f0e6;--mute:#9bb0a0;--card:#1b261e;--line:#2c3b30;--green:#6fc183;--zone:#2d5a38;--ok:#6fc183;--near:#e3b04a;--bad:#ef8a62;--sky:#6db4e3}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times New Roman",serif}
+.wrap{max-width:900px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:2rem;margin:.2em 0}
+h2{font-size:1.15rem;margin:0 0 12px}
+.sub{color:var(--mute);margin:0 0 18px;max-width:60ch}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+button,input,select{font:inherit;padding:10px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+button{cursor:pointer;background:var(--green);color:#fff;border-color:var(--green)}
+button.alt{background:var(--card);color:var(--ink)}
+:is(button,input,select):focus-visible{outline:3px solid var(--sky);outline-offset:2px}
+input{flex:1;min-width:160px}
+#status{min-height:1.5em;margin:6px 0 14px}
+#places{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.verdict{font-size:1.2rem;border-left:6px solid var(--ok)}
+.verdict.near{border-left-color:var(--near)}.verdict.bad{border-left-color:var(--bad)}
+.row{margin-bottom:18px}
+.row .top{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:.95rem}
+.track{position:relative;height:16px;background:var(--line);border-radius:8px;margin:8px 0 4px}
+.zone{position:absolute;top:0;bottom:0;background:var(--zone);border:1px solid var(--ok)}
+.mark{position:absolute;top:-5px;width:6px;height:26px;border-radius:3px;background:var(--ink);transform:translateX(-3px)}
+.scale{display:flex;justify-content:space-between;color:var(--mute);font-size:.8rem}
+.tag{font-weight:bold}.tag.ok{color:var(--ok)}.tag.near{color:var(--near)}.tag.bad{color:var(--bad)}
+.rank{display:grid;grid-template-columns:100px 1fr 44px;gap:8px;align-items:center;margin:4px 0;cursor:pointer;background:none;border:0;color:inherit;width:100%;text-align:left;padding:2px}
+.rank .b{height:18px;background:var(--line);border-radius:4px;overflow:hidden}
+.rank .b i{display:block;height:100%}
+.rank.sel{font-weight:bold}
+.note{color:var(--mute);font-size:.85rem}
+dialog{border:1px solid var(--line);border-radius:12px;max-width:420px;background:var(--card);color:var(--ink);padding:22px}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Which crop suits your land?</h1>
+  <p class="sub">Enter a place or share your location. We compare the real climate there with what each crop needs.</p>
+
+  <div class="bar">
+    <input id="q" placeholder="Type a place, e.g. Palakkad" aria-label="Place name">
+    <button id="search">Search place</button>
+    <button class="alt" id="gps">Use my location</button>
+  </div>
+  <div id="places"></div>
+  <div id="status" role="status"></div>
+
+  <div id="out" hidden>
+    <div class="bar"><label for="crop" style="align-self:center">Crop:</label><select id="crop"></select></div>
+    <section class="verdict" id="verdict"></section>
+    <section><h2>Your climate against what the crop needs</h2><div id="rows"></div>
+      <p class="note">Green zone is the ideal range for the crop. The black marker is the measured value at your location.</p></section>
+    <section><h2>All crops ranked for this location</h2><div id="ranks"></div>
+      <p class="note">Click a crop to see its detailed graphs.</p></section>
+    <p class="note">Data: Open-Meteo (temperature, rainfall, soil moisture) and NASA POWER (humidity), averaged over the last 12 months. Crop ranges are approximate general values; confirm with your local agriculture office (Krishi Bhavan or KAU) before planting.</p>
+  </div>
+</div>
+
+<dialog id="ask">
+  <h2>Allow location access?</h2>
+  <p>FarmCare uses your location only to fetch climate data for your field. It is not stored. Your browser will now ask for permission.</p>
+  <div class="bar" style="margin:0"><button id="yes">Continue</button><button class="alt" id="no">Not now</button></div>
+</dialog>
+
+<script>
+const $=id=>document.getElementById(id);
+const status=t=>$('status').textContent=t;
+const get=async u=>{const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json()};
+const ymd=d=>d.toISOString().slice(0,10);
+const avg=a=>a.reduce((x,y)=>x+y,0)/a.length;
+
+// t=temperature °C, r=annual rainfall mm, h=humidity %, s=soil moisture m³/m³ (approximate ideal ranges)
+const CROPS={
+ Rice:{t:[22,32],r:[1200,2500],h:[60,85],s:[.30,.50]},
+ Coconut:{t:[25,32],r:[1500,2500],h:[70,90],s:[.25,.45]},
+ Banana:{t:[24,32],r:[1200,2200],h:[65,85],s:[.25,.45]},
+ "Black pepper":{t:[23,32],r:[2000,3000],h:[70,90],s:[.25,.45]},
+ Rubber:{t:[25,34],r:[2000,3000],h:[75,90],s:[.25,.45]},
+ Tapioca:{t:[25,30],r:[1000,1500],h:[60,80],s:[.20,.40]},
+ Ginger:{t:[22,30],r:[1500,3000],h:[70,90],s:[.25,.45]},
+ Tea:{t:[18,28],r:[1500,3000],h:[70,90],s:[.25,.45]},
+ Cardamom:{t:[15,27],r:[1500,4000],h:[75,95],s:[.30,.50]},
+ Wheat:{t:[12,25],r:[450,900],h:[50,70],s:[.20,.35]}
+};
+const PARAMS=[
+ {k:'t',label:'Average temperature',unit:'°C',max:45,d:1},
+ {k:'r',label:'Yearly rainfall',unit:'mm',max:4500,d:0},
+ {k:'h',label:'Humidity (yearly average)',unit:'%',max:100,d:0},
+ {k:'s',label:'Soil moisture now',unit:'m³/m³',max:.6,d:2}
+];
+let cur=null;
+
+// Permission flow: explain first, then the browser prompt
+$('gps').onclick=()=>{
+  if(!navigator.geolocation)return status('This browser has no GPS support. Type a place name instead.');
+  $('ask').showModal();
+};
+$('no').onclick=()=>{$('ask').close();status('No problem. Type a place name to continue.')};
+$('yes').onclick=()=>{
+  $('ask').close();status('Waiting for your permission…');
+  navigator.geolocation.getCurrentPosition(
+    p=>load(p.coords.latitude,p.coords.longitude,'Your location'),
+    e=>status(e.code===1?'Location permission denied. Allow it in browser settings, or type a place name.'
+      :e.code===2?'Could not find your position. Type a place name instead.':'Location request timed out. Try again or type a place name.'),
+    {enableHighAccuracy:true,timeout:15000,maximumAge:60000});
+};
+
+// Place search, no GPS needed
+$('search').onclick=async()=>{
+  const q=$('q').value.trim();if(!q)return;
+  try{
+    status('Searching…');$('places').innerHTML='';
+    const g=await get('https://geocoding-api.open-meteo.com/v1/search?count=5&name='+encodeURIComponent(q));
+    if(!g.results)return status('No place found. Check the spelling.');
+    status('Choose your place:');
+    g.results.forEach(r=>{
+      const b=document.createElement('button');b.className='alt';
+      b.textContent=r.name+', '+(r.admin1||'')+' '+(r.country_code||'');
+      b.onclick=()=>{$('places').innerHTML='';load(r.latitude,r.longitude,r.name)};
+      $('places').appendChild(b);
+    });
+  }catch(e){
+    console.error(e);
+    status('Search failed ('+(e.message||e)+'). '+(location.protocol==='file:'?'Open the page through http://localhost or a hosted link, not by double-clicking the file. ':'')+'Check your internet connection or ad blocker.');
+  }
+};
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')$('search').click()});
+
+async function load(lat,lon,name){
+  status('Loading climate data for '+name+'…');
+  const end=new Date(Date.now()-5*864e5),start=new Date(end-364*864e5);
+  const arch='https://archive-api.open-meteo.com/v1/archive?latitude='+lat+'&longitude='+lon+'&start_date='+ymd(start)+'&end_date='+ymd(end)
+    +'&daily=temperature_2m_mean,precipitation_sum,relative_humidity_2m_mean&timezone=auto';
+  const soil='https://api.open-meteo.com/v1/forecast?latitude='+lat+'&longitude='+lon+'&hourly=soil_moisture_0_to_7cm&past_days=3&forecast_days=1&timezone=auto';
+  const pw='https://power.larc.nasa.gov/api/temporal/daily/point?parameters=RH2M&community=AG&longitude='+lon+'&latitude='+lat
+    +'&start='+ymd(start).replace(/-/g,'')+'&end='+ymd(end).replace(/-/g,'')+'&format=JSON';
+  const [a,s,p]=await Promise.allSettled([get(arch),get(soil),get(pw)]);
+  if(a.status!=='fulfilled')return status('Could not load climate data. Check your internet connection.');
+  const D=a.value.daily,ok=v=>v!=null&&v>=0;
+  cur={name,lat,lon,
+    t:avg(D.temperature_2m_mean.filter(ok)),
+    r:D.precipitation_sum.filter(ok).reduce((x,y)=>x+y,0)};
+  let src='Open-Meteo';
+  if(p.status==='fulfilled'){const v=Object.values(p.value.properties.parameter.RH2M).filter(ok);if(v.length)cur.h=avg(v),src='NASA POWER'}
+  if(cur.h==null)cur.h=avg(D.relative_humidity_2m_mean.filter(ok));
+  if(s.status==='fulfilled'){const v=s.value.hourly.soil_moisture_0_to_7cm.filter(x=>x!=null);if(v.length)cur.s=avg(v)}
+  status(name+' ('+lat.toFixed(2)+', '+lon.toFixed(2)+'). Humidity from '+src+'.');
+  $('out').hidden=false;
+  if(!$('crop').options.length)Object.keys(CROPS).forEach(c=>$('crop').add(new Option(c,c)));
+  render();
+}
+$('crop').onchange=()=>render();
+
+function score(v,[lo,hi]){if(v==null)return null;if(v>=lo&&v<=hi)return 1;const d=v<lo?lo-v:v-hi;return Math.max(0,1-d/((hi-lo)*.5))}
+const cls=s=>s>=.99?'ok':s>=.5?'near':'bad';
+const total=c=>{const v=PARAMS.map(p=>score(cur[p.k],CROPS[c][p.k])).filter(x=>x!=null);return avg(v)};
+
+function render(){
+  const crop=$('crop').value||Object.keys(CROPS)[0],C=CROPS[crop];
+  let html='';
+  PARAMS.forEach(p=>{
+    const v=cur[p.k];if(v==null){html+='<div class="row"><b>'+p.label+'</b>: not available</div>';return}
+    const [lo,hi]=C[p.k],sc=score(v,[lo,hi]),c=cls(sc);
+    const pct=x=>Math.min(100,Math.max(0,x/p.max*100));
+    const msg=c==='ok'?'Suitable':v<lo?'Too low':'Too high';
+    html+='<div class="row"><div class="top"><b>'+p.label+'</b><span>'+v.toFixed(p.d)+' '+p.unit+' · needs '+lo+'–'+hi+' · <span class="tag '+c+'">'+(c==='near'?'Slightly '+msg.toLowerCase():msg)+'</span></span></div>'
+     +'<div class="track"><div class="zone" style="left:'+pct(lo)+'%;width:'+(pct(hi)-pct(lo))+'%"></div><div class="mark" style="left:'+pct(v)+'%"></div></div>'
+     +'<div class="scale"><span>0</span><span>'+p.max+' '+p.unit+'</span></div></div>';
+  });
+  $('rows').innerHTML=html;
+  const T=total(crop),vc=$('verdict');
+  vc.className='verdict '+(T>=.9?'':T>=.6?'near':'bad');
+  vc.textContent=cur.name+': '+crop+' is '+(T>=.9?'well suited':T>=.6?'moderately suited':'poorly suited')+' here ('+Math.round(T*100)+'% match).';
+  const list=Object.keys(CROPS).map(c=>[c,total(c)]).sort((a,b)=>b[1]-a[1]);
+  $('ranks').innerHTML=list.map(([c,t])=>'<button class="rank'+(c===crop?' sel':'')+'" data-c="'+c+'"><span>'+c+'</span><span class="b"><i style="width:'+Math.round(t*100)+'%;background:var(--'+cls(t>=.9?1:t)+')"></i></span><span>'+Math.round(t*100)+'%</span></button>').join('');
+  document.querySelectorAll('.rank').forEach(b=>b.onclick=()=>{$('crop').value=b.dataset.c;render()});
+}
+</script>
+</body>
+</html>
